@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Локальний чат</title>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        #chat {
+            border: 1px solid #ccc;
+            /* розтягнути на 80% висоти вікна */
+            height: 80vh;
+            overflow-y: scroll;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        #message {
+            flex: 1;
+            box-sizing: border-box;
+            height: 80px;
+            padding: 10px;
+            font-size: 1em;
+            resize: none;
+            font-family: Arial, sans-serif;
+            margin-right: 5px;
+        }
+        #send {
+            height: 80px;
+            width: 50px;
+            flex-shrink: 0;
+            cursor: pointer;
+            font-size: 1.2em;
+        }
+        .delete-btn {
+            background: transparent;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+            font-size: 0.8em;
+            margin-left: 10px;
+            vertical-align: top;
+        }
+        .delete-btn:hover {
+            opacity: 0.7;
+        }
+        .msg-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+        #message-container {
+            display: flex;
+            margin-bottom: 10px;
+        }
+        #file-input {
+            margin-bottom: 10px;
+        }
+        img.chat-image {
+            /* ширина 60% від ширини вікна, але не більше за 100% контейнера */
+            max-width: 60vw;
+            width: 60%;
+            height: auto;
+            border-radius: 5px;
+            margin-top: 5px;
+        }
+        @media (min-width: 400px) {
+            #message { width: 70%; display: inline-block; }
+            #send { width: 8%; display: inline-block; vertical-align: top; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Локальний чат</h1>
+
+    <!-- Вивід повідомлень -->
+    <div id="chat"></div>
+
+    <!-- Нікнейм -->
+    <div style="margin: 15px 0;">
+        <label for="nickname">Ваш нікнейм:</label>
+        <input id="nickname" placeholder="Анонім" style="margin-left: 10px;">
+    </div>
+
+    <!-- Швидкі смайлики -->
+    <div id="emoji-bar" style="margin:10px 0;">
+        <!-- кнопки будуть додані скриптом -->
+    </div>
+
+    <!-- Ввід повідомлення -->
+    <div id="message-container">
+        <textarea id="message" placeholder="Напишіть повідомлення..."></textarea>
+        <button id="send">➤</button>
+    </div>
+
+    <!-- Завантаження файлів -->
+    <div>
+        <input id="file-input" type="file" accept="image/jpeg,image/png" placeholder="Виберіть jpg або png">
+        <button id="send-image">Надіслати зображення</button>
+    </div>
+
+    <script>
+        // Версійування для запобігання кешуванню JS
+        var version = new Date().getTime();
+        var socket = io();
+
+        // Генерувати консистентний колір на основі нікнейму
+        function getColorForUser(username) {
+            var hash = 0;
+            for (var i = 0; i < username.length; i++) {
+                hash = username.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            var hue = hash % 360;
+            return 'hsl(' + hue + ', 70%, 60%)';
+        }
+
+        // додає прості смайлики на панель та обробники
+        function setupEmojiBar() {
+            var emojis = ['😀','😂','😍','😎','😢','😡','👍','🎉'];
+            var bar = document.getElementById('emoji-bar');
+            emojis.forEach(function(e) {
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = e;
+                btn.style.fontSize = '1.2em';
+                btn.style.marginRight = '5px';
+                btn.onclick = function() { insertEmoji(e); };
+                bar.appendChild(btn);
+            });
+        }
+
+        // вставка emoji в текстове поле у поточну позицію курсора
+        function insertEmoji(emoji) {
+            var input = document.getElementById('message');
+            var start = input.selectionStart;
+            var end = input.selectionEnd;
+            var text = input.value;
+            input.value = text.substring(0, start) + emoji + text.substring(end);
+            // встановити курсор після вставки
+            var pos = start + emoji.length;
+            input.setSelectionRange(pos, pos);
+            input.focus();
+        }
+
+        // гарантований скрол до останнього повідомлення
+        function scrollToBotom() {
+            var chat = document.getElementById('chat');
+            requestAnimationFrame(function() {
+                chat.scrollTop = chat.scrollHeight;
+            });
+        }
+
+        function appendMessage(m) {
+            var chat = document.getElementById('chat');
+            var color = getColorForUser(m.user);
+            var msgContent = '<div style="margin-top: 5px;">' + m.text + '</div>';
+            
+            // Якщо є зображення
+            if (m.image) {
+                msgContent += '<img src="/files/' + m.image + '" class="chat-image" alt="зображення">';
+            }
+            
+            // унікальний ID для повідомлення
+            var msgId = m.timestamp || Date.now();
+            
+            var msgHtml = '<div id="msg-' + msgId + '" style="margin: 10px 0; padding: 8px; border-left: 4px solid ' + color + '; background: #f9f9f9;">' +
+                            '<div class="msg-header">' +
+                            '<div>' +
+                            '<strong style="color: ' + color + ';">' + m.user + '</strong> ' +
+                            '<span style="color: #999; font-size: 0.9em;">[' + m.timestamp + ']</span>' +
+                            '</div>' +
+                            '<button class="delete-btn" onclick="deleteMessage(\'' + msgId + '\')">❌</button>' +
+                            '</div>' +
+                            msgContent +
+                          '</div>';
+            chat.innerHTML += msgHtml;
+            // скрол спрацює після того, як DOM оновиться
+            scrollToBotom();
+        }
+
+        // видалення повідомлення
+        function deleteMessage(msgId) {
+            if (confirm('Ви дійсно бажаєте видалити це повідомлення?')) {
+                fetch('/delete-message', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({timestamp: msgId})
+                }).then(function(r) { return r.json(); })
+                  .then(function(data) {
+                      if (data.success) {
+                          // видалити з DOM
+                          var elem = document.getElementById('msg-' + msgId);
+                          if (elem) {
+                              elem.remove();
+                          }
+                          // сповістити інших клієнтів
+                          socket.emit('message-deleted', {timestamp: msgId});
+                      } else {
+                          alert('Помилка при видаленні: ' + data.error);
+                      }
+                  })
+                  .catch(function(e) { alert('Помилка: ' + e); });
+            }
+        }
+
+        // подія завантаження сторінки — підвантажуємо збережений нікнейм
+        window.addEventListener('DOMContentLoaded', function() {
+            var saved = localStorage.getItem('nickname');
+            if (saved) {
+                document.getElementById('nickname').value = saved;
+            }
+            setupEmojiBar();
+        });
+
+        // обробка історії при з'єднанні
+        socket.on('history', function(list) {
+            list.forEach(function(m) { appendMessage(m); });
+            // додатковий скрол після всіх повідомлень
+            setTimeout(function() {
+                scrollToBotom();
+            }, 50);
+        });
+
+        // отримання нового повідомлення
+        socket.on('message', function(msg) {
+            appendMessage(msg);
+            // гарантований скрол для нових повідомлень
+            scrollToBotom();
+        });
+
+        // отримання подій видалення повідомлення
+        socket.on('message-deleted', function(data) {
+            var elem = document.getElementById('msg-' + data.timestamp);
+            if (elem) {
+                elem.remove();
+            }
+        });
+
+        // Відправка повідомлення
+        document.getElementById('send').onclick = function() {
+            var userEl = document.getElementById('nickname');
+            var user = userEl.value.trim();
+            var text = document.getElementById('message').value;
+            
+            if (!user) {
+                alert('Будь ласка, введіть ваш нікнейм');
+                userEl.focus();
+                return;
+            }
+            // зберігаємо нікнейм локально, щоб не треба було вводити знову
+            localStorage.setItem('nickname', user);
+
+            if (!text) return;
+            
+            socket.send({user: user, text: text});
+            document.getElementById('message').value = '';
+        };
+
+        // Відправка зображення
+        document.getElementById('send-image').onclick = function() {
+            var user = document.getElementById('nickname').value.trim();
+            var fileInput = document.getElementById('file-input');
+            var file = fileInput.files[0];
+            
+            if (!user) {
+                alert('Будь ласка, введіть ваш нікнейм');
+                document.getElementById('nickname').focus();
+                return;
+            }
+            // також зберігаємо нікнейм під час відправки зображення
+            localStorage.setItem('nickname', user);
+            if (!file) {
+                alert('Виберіть файл');
+                return;
+            }
+            
+            var formData = new FormData();
+            formData.append('file', file);
+            formData.append('user', user);
+            
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            }).then(function(r) { return r.json(); })
+              .then(function(data) {
+                  if (data.success) {
+                      socket.send({
+                          user: data.user,
+                          text: '📷 [зображення]',
+                          image: data.filename
+                      });
+                      fileInput.value = '';
+                  } else {
+                      alert('Помилка: ' + data.error);
+                  }
+              })
+              .catch(function(e) { alert('Помилка: ' + e); });
+        };
+    </script>
+</body>
+</html>
